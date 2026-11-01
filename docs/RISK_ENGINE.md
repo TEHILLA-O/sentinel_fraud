@@ -16,10 +16,10 @@ public interface IRiskRule
 
 | Score | Level | Decision |
 | --- | --- | --- |
-| 0–29 | LOW | APPROVE |
-| 30–59 | MEDIUM | APPROVE, or REVIEW when velocity / impossible travel / repeated decline fired |
-| 60–79 | HIGH | REVIEW |
-| 80–100 | CRITICAL | BLOCK |
+| 0-29 | LOW | APPROVE |
+| 30-59 | MEDIUM | APPROVE, or REVIEW when velocity / impossible travel / repeated decline fired |
+| 60-79 | HIGH | REVIEW |
+| 80-100 | CRITICAL | BLOCK |
 
 ## Model combination
 
