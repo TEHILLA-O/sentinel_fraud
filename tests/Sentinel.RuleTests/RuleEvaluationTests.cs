@@ -249,9 +249,11 @@ public class RemainingRuleTests
     public async Task New_account_boundary()
     {
         var rule = new NewAccountRule();
-        var young = RiskContextFactory.Example(profile: p => p with { AccountOpenedAt = DateTimeOffset.UtcNow.AddDays(-3) });
+        // Anchor to the factory's fixed EvaluatedAt so the test does not drift with the wall clock.
+        var evaluatedAt = new DateTimeOffset(2026, 9, 12, 12, 0, 0, TimeSpan.Zero);
+        var young = RiskContextFactory.Example(profile: p => p with { AccountOpenedAt = evaluatedAt.AddDays(-3) });
         (await rule.EvaluateAsync(young, CancellationToken.None)).Triggered.Should().BeTrue();
-        var mature = RiskContextFactory.Example(profile: p => p with { AccountOpenedAt = DateTimeOffset.UtcNow.AddDays(-30) });
+        var mature = RiskContextFactory.Example(profile: p => p with { AccountOpenedAt = evaluatedAt.AddDays(-30) });
         (await rule.EvaluateAsync(mature, CancellationToken.None)).Triggered.Should().BeFalse();
     }
 
