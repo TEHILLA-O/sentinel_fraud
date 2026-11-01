@@ -1,52 +1,49 @@
 # Sentinel
 
-Real-time transaction monitoring, fraud detection and risk decision platform.
+Sentinel is a C# / .NET 10 portfolio system that shows how a bank or payments team could score card transactions in real time, explain every decision, and hand risky ones to a fraud analyst.
 
-See [FAILURES.md](./FAILURES.md) for what can go wrong, what broke, how it was fixed, and results.
+Read [FAILURES.md](./FAILURES.md) for what can go wrong, what broke, how it was fixed, and results.
 
-Sentinel is a C# / .NET 10 event-driven system. It ingests card and payment events, scores them with an explainable rules engine, and lets fraud analysts work cases from a Blazor console.
+## What it does
 
-It exists to demonstrate production-shaped distributed systems work: Kafka, Redis velocity, PostgreSQL auditability, idempotent consumers, and a deterministic risk model that a reviewer can step through.
+- Accepts card and payment events over HTTP and publishes them to Kafka.
+- Enriches each event with Redis velocity windows (1 minute, 5 minutes, 1 hour, 24 hours) and the customer profile.
+- Scores the event with 13 independent rules, caps the score at 100, and returns APPROVE, REVIEW or BLOCK.
+- Stores every decision in PostgreSQL together with the exact ruleset version that produced it.
+- Opens a case for REVIEW and BLOCK, and pushes it to a Blazor analyst console over SignalR.
+- Lets analysts add notes and label a case as fraud or a false positive.
 
-## 60-second tour
+All transactions are synthetic. There are no real customers, cards or banks behind this project.
 
-1. A transaction enters HTTP ingestion and is published to Kafka.
-2. The processor enriches it with Redis velocity and the customer profile.
-3. Thirteen independently tested rules produce a capped 0–100 score.
-4. APPROVE / REVIEW / BLOCK is persisted with the exact ruleset version used.
-5. REVIEW and BLOCK open cases. The Blazor grid updates over SignalR.
+## How it works
 
 ```mermaid
 flowchart LR
-
-    TX[Transaction Producer]
-    K1[Kafka Raw Transactions]
-    P[Transaction Processor]
-    RE[Risk Engine]
-    RD[(Redis)]
-    PG[(PostgreSQL)]
-    K2[Kafka Decisions]
-    CM[Case Management]
-    UI[Blazor Dashboard]
-
-    TX --> K1
-    K1 --> P
-    P --> RE
-
-    RE --> RD
-    RE --> PG
-    RE --> K2
-
-    K2 --> CM
+    TX[Ingestion API] --> K1[Kafka: raw transactions]
+    K1 --> P[Transaction processor]
+    P --> RE[Risk engine: 13 rules]
+    RE --> RD[(Redis velocity)]
+    RE --> PG[(PostgreSQL)]
+    RE --> K2[Kafka: decisions and alerts]
+    K2 --> CM[Case management]
     CM --> PG
-
-    PG --> UI
+    PG --> UI[Blazor console]
     K2 --> UI
 ```
 
-## Example decision
+1. A transaction enters the ingestion API and is published to `sentinel.transactions.raw.v1`, keyed by `AccountId`.
+2. The processor validates it, reads velocity counters from Redis and loads the profile.
+3. Each rule implementing `IRiskRule` returns triggered or not, a score and a plain English reason.
+4. A separate decision policy turns the capped score into APPROVE, REVIEW or BLOCK.
+5. Consumers are idempotent: an inbox table keyed on `EventId` and a unique `TransactionId` on decisions stop Kafka redelivery from creating duplicate cases. See [docs/IDEMPOTENCY.md](docs/IDEMPOTENCY.md).
 
-Input: `TX-928382`, account `A-91828`, £4,850, US, card not present, unknown device, 7 tx / 5 minutes, typical spend £87.
+An optional ML.NET anomaly model (`MlNetAnomalyRiskModel`, off unless `Risk:UseMlNet=true`) can add at most 15 points. By default `NoOpRiskModel` is used, so decisions come from the rules alone.
+
+### Worked example
+
+This scenario is a unit test in `tests/Sentinel.Domain.Tests`.
+
+Input: `TX-928382`, account `A-91828`, £4,850, US merchant, card not present, unknown device, 7 transactions in 5 minutes, typical spend £87.
 
 | Rule | Score |
 | --- | --- |
@@ -56,66 +53,46 @@ Input: `TX-928382`, account `A-91828`, £4,850, US, card not present, unknown de
 | UNKNOWN_DEVICE | +15 |
 | HIGH_VELOCITY | +30 |
 | BEHAVIOURAL_DEVIATION | +15 |
-| Raw | 110 |
+| Raw total | 110 |
 | Capped | 100 |
 | Decision | BLOCK |
 
-That scenario is a unit test in `Sentinel.Domain.Tests`.
+## Quick start
 
-## Screenshots
-
-Live operations grid:
-
-![Live transactions](docs/images/live-transactions.png)
-
-Explainable case / decision detail:
-
-![Case detail](docs/images/case-detail.png)
-
-## Technology stack
-
-.NET 10, C# 14, ASP.NET Core, EF Core 10, PostgreSQL, Redis, Apache Kafka, Confluent.Kafka, Blazor, SignalR, OpenAPI, OpenTelemetry, .NET Aspire, Docker Compose, xUnit, Testcontainers, optional ML.NET.
-
-## Event pipeline
-
-| Topic | Purpose |
-| --- | --- |
-| `sentinel.transactions.raw.v1` | Accepted ingress |
-| `sentinel.transactions.validated.v1` | Passed validation |
-| `sentinel.risk.decisions.v1` | Explainable scores |
-| `sentinel.alerts.v1` | REVIEW / BLOCK |
-| `sentinel.deadletter.v1` | Poison / exhausted retries |
-| `sentinel.profile.updated.v1` | Async profile updates |
-| `sentinel.case.feedback.v1` | Analyst labels |
-
-Partition key: `AccountId`.
-
-## Risk engine
-
-Rules implement `IRiskRule` and are independently testable. Decision policy is separate from rule code. Configuration is versioned in PostgreSQL and cached. Historical decisions keep the ruleset they were scored with.
-
-Optional `IRiskModel` (`NoOpRiskModel` by default, `MlNetAnomalyRiskModel` behind a flag) can add at most 15 points when confidence is high.
-
-## Redis
-
-Sorted sets track transactions, spend, distinct merchants, distinct countries and failures across 1m / 5m / 1h / 24h windows with key expiry.
-
-## Database
-
-PostgreSQL stores transactions, immutable risk decisions, ruleset versions, cases, case history, notes, profiles, known devices, audit events, outbox and inbox rows. Indexes are declared in `SentinelDbContext`.
-
-## Running locally
+You need the .NET 10 SDK. Integration tests also need Docker.
 
 ```bash
-dotnet restore
-dotnet build
-dotnet test
-dotnet run --project src/Sentinel.AppHost
+git clone https://github.com/TEHILLA-O/sentinel_fraud.git
+cd sentinel_fraud
+dotnet restore Sentinel.slnx
+dotnet test tests/Sentinel.Domain.Tests
+dotnet test tests/Sentinel.RuleTests
+dotnet test tests/Sentinel.ArchitectureTests
+dotnet test tests/Sentinel.PerformanceTests
+dotnet test tests/Sentinel.IntegrationTests   # starts PostgreSQL, Redis and Kafka with Testcontainers
 ```
 
-Aspire starts PostgreSQL, Redis, Kafka and every Sentinel process.
+### Verified test run (1 November 2026, Linux, .NET SDK 10)
 
-## Docker
+| Project | Result |
+| --- | --- |
+| Sentinel.Domain.Tests | 16 passed |
+| Sentinel.RuleTests | 29 passed (after the date fix in commit `aafce70`) |
+| Sentinel.ArchitectureTests | 2 passed |
+| Sentinel.IntegrationTests | 6 passed, using Testcontainers on a local Docker daemon |
+| Sentinel.PerformanceTests | 1 passed |
+
+The performance test printed:
+
+```text
+In-process engine P50=0ms P95=0ms P99=0ms
+```
+
+That is 250 in-process evaluations of the example above, rounded to whole milliseconds, with no Kafka, Redis or PostgreSQL in the loop. It is not an end-to-end throughput figure. End-to-end throughput has not been measured yet.
+
+### Running the full stack
+
+These commands are documented by the project but were **not verified** in the 1 November 2026 run:
 
 ```bash
 docker compose up --build
@@ -129,47 +106,94 @@ docker compose up --build
 | Admin API | http://localhost:8083 |
 | Kafka UI | http://localhost:8088 |
 
-Sign in: `analyst@sentinel.local` / `Sentinel!23`
+The database seeder creates a local demo analyst, `analyst@sentinel.local` with password `Sentinel!23`. It exists only for the local demo. Change it before running Sentinel anywhere reachable from a network.
 
-## Demo generator
+Generate traffic once the stack is up:
 
 ```bash
 dotnet run --project tools/Sentinel.TransactionGenerator -- --mode mixed --rate 20 --endpoint http://localhost:8081/api/v1/transactions
 ```
 
-Modes: `normal`, `suspicious`, `fraud-burst`, `mixed`.
+Modes are `normal`, `suspicious`, `fraud-burst` and `mixed`. More detail is in [docs/DEMO.md](docs/DEMO.md).
 
-## Testing
+The .NET Aspire host (`dotnet run --project src/Sentinel.AppHost`) is the other way to start everything. See the known issues below.
 
-```bash
-dotnet test
+## Screenshots
+
+Live operations grid:
+
+![Live transactions](docs/images/live-transactions.png)
+
+Case detail with the triggered rules:
+
+![Case detail](docs/images/case-detail.png)
+
+## Project structure
+
+```text
+sentinel_fraud/
+├── src/
+│   ├── Ingestion/Sentinel.Ingestion.Api         HTTP ingress, publishes to Kafka
+│   ├── RiskEngine/                              domain rules, application services, Redis and Kafka adapters
+│   ├── CaseManagement/Sentinel.Cases.Api        cases, notes, analyst feedback
+│   ├── Administration/Sentinel.Admin.Api        ruleset versions and parameters
+│   ├── Workers/                                 background consumers
+│   ├── Web/Sentinel.Web                         Blazor analyst console
+│   ├── BuildingBlocks/                          contracts, eventing, persistence, shared kernel
+│   ├── Sentinel.AppHost                         .NET Aspire orchestration
+│   └── Sentinel.ServiceDefaults                 OpenTelemetry, health checks, auth
+├── tests/                                       domain, rule, architecture, integration and performance tests
+├── tools/Sentinel.TransactionGenerator          synthetic traffic generator
+├── docker/ and docker-compose.yml               container setup
+└── docs/                                        architecture, rules, ADRs, known issues
 ```
 
-Rule tests cover positive, negative, boundary and edge cases. Integration tests use Testcontainers for PostgreSQL, Redis and Kafka when Docker is available.
+## Kafka topics
 
-## Performance
+| Topic | Purpose |
+| --- | --- |
+| `sentinel.transactions.raw.v1` | Accepted ingress |
+| `sentinel.transactions.validated.v1` | Passed validation |
+| `sentinel.risk.decisions.v1` | Explainable scores |
+| `sentinel.alerts.v1` | REVIEW and BLOCK |
+| `sentinel.deadletter.v1` | Poison messages and exhausted retries |
+| `sentinel.profile.updated.v1` | Profile updates |
+| `sentinel.case.feedback.v1` | Analyst labels |
 
-See `docs/PERFORMANCE.md`. In-process engine latency percentiles are measured in `Sentinel.PerformanceTests`. No unverified throughput claims.
+## Configuration
 
-## Security
+- Rule thresholds live in versioned ruleset rows in PostgreSQL and are cached. Historical decisions keep the version they were scored with.
+- `Risk:UseMlNet` turns the optional ML.NET model on.
+- Connection strings for PostgreSQL, Redis and Kafka come from `appsettings.json`, environment variables or Aspire.
+- APIs use JWT. The dashboard uses cookie sign-in. Roles are analyst, senior analyst, risk manager, admin and auditor.
 
-JWT on APIs, cookie auth on the dashboard, ASP.NET authorization policies for analyst / senior / risk manager / admin / auditor. Privileged changes are audited.
+## Limitations and known issues
 
-## Observability
+- **Aspire host does not build without the Aspire CLI.** On 1 November 2026, `dotnet build Sentinel.slnx` failed only on `Sentinel.AppHost` with `ASPIRE009` because Aspire 13.5 now expects the Aspire CLI on `PATH`. Every other project built. Install it from https://get.aspire.dev or use Docker Compose instead.
+- **NuGet advisories.** The build reports transitive advisories for `MessagePack` and `Microsoft.OpenApi`. See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
+- **Obsolete Testcontainers constructors** produce warnings in the integration tests.
+- `dotnet format --verify-no-changes` is advisory in CI.
+- The dashboard reads PostgreSQL directly instead of going through the APIs.
+- The ML.NET model is trained on synthetic data only.
+- No precision, recall or false positive rate has been measured, because there is no labelled real data. Not measured yet.
+- There is no LICENSE file, so by default nobody else has permission to reuse the code.
 
-OpenTelemetry tracing, metrics and structured logs. Custom meter `Sentinel` emits processed / blocked / review / duration / cases / rule-trigger / error / dead-letter counters. `/health` and `/alive` are mapped on HTTP services.
+## Status
 
-## Design decisions
+Portfolio project. The domain, rules, idempotency and integration tests run and pass on a fresh clone. The full Compose and Aspire stack was not started during this review. Not deployed anywhere.
 
-Architecture decision records are in `docs/adr/`.
+## Further reading
 
-## Roadmap
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/EVENT_FLOW.md](docs/EVENT_FLOW.md)
+- [docs/RISK_ENGINE.md](docs/RISK_ENGINE.md) and [docs/RULES.md](docs/RULES.md)
+- [docs/IDEMPOTENCY.md](docs/IDEMPOTENCY.md)
+- [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+- [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)
+- [docs/adr/](docs/adr/) for architecture decisions
+- [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md)
 
-- Continuous ML training from analyst feedback
-- Multi-region velocity
-- Card-network ISO 8583 adapter
-- Enforced `dotnet format` gate
+## Licence
 
-## Documentation
-
-`docs/ARCHITECTURE.md` · `EVENT_FLOW.md` · `RISK_ENGINE.md` · `RULES.md` · `IDEMPOTENCY.md` · `SECURITY.md` · `PERFORMANCE.md` · `DEMO.md` · `BUILD_PROGRESS.md` · `KNOWN_ISSUES.md`
+No licence file has been added yet. All rights are reserved by the author until one is chosen.

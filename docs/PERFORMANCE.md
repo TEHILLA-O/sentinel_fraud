@@ -19,3 +19,5 @@ Record observed ingestion HTTP accept rate and decision persist latency from log
 Recorded when tests last ran on the development workstation. Replace this line after `dotnet test tests/Sentinel.PerformanceTests`:
 
 - Engine-only: `Sentinel.PerformanceTests` passed on this workstation with P99 under 250 ms for 250 evaluations of the documented example transaction.
+
+Re-run on 1 November 2026 (Linux, .NET SDK 10): the test passed and printed `In-process engine P50=0ms P95=0ms P99=0ms`, meaning every evaluation finished in under a millisecond when rounded. End-to-end throughput is not measured yet.
